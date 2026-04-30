@@ -378,6 +378,88 @@ with tab3:
         )
         st.dataframe(top, use_container_width=True, hide_index=True)
 
+        # ── SHAP 피처 중요도 ───────────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("🔍 SHAP 피처 중요도")
+        st.caption("이탈 예측 모델이 어떤 요인을 가장 중요하게 보는지 설명합니다.")
+
+        CHURN_FEATURES = [
+            "max_level", "total_playtime", "total_gacha", "total_spent",
+            "active_days", "avg_daily_playtime", "avg_sessions", "max_consec_login",
+        ]
+        FEATURE_KO = {
+            "max_level":          "최고 레벨",
+            "total_playtime":     "총 플레이타임",
+            "total_gacha":        "총 가챠 횟수",
+            "total_spent":        "누적 결제금액",
+            "active_days":        "활성 일수",
+            "avg_daily_playtime": "일 평균 플레이타임",
+            "avg_sessions":       "일 평균 세션 수",
+            "max_consec_login":   "최대 연속 로그인",
+        }
+
+        try:
+            import shap
+            import json
+            from pathlib import Path as FPath
+            from xgboost import XGBClassifier
+
+            model_dir = FPath("/dashboard/data/models")
+            feat_path = FPath("/dashboard/data/features/churn_features.parquet")
+
+            if not feat_path.exists():
+                st.warning("모델 파일이 없습니다. DAG3를 먼저 실행해주세요.")
+            else:
+                feat_df = pd.read_parquet(feat_path).dropna(subset=CHURN_FEATURES)
+                sample  = feat_df[CHURN_FEATURES].sample(min(2000, len(feat_df)), random_state=42)
+
+                best_model = "xgb"
+                meta_path  = model_dir / "churn_meta.json"
+                if meta_path.exists():
+                    with open(meta_path) as f:
+                        best_model = json.load(f).get("best_churn_model", "xgb")
+
+                try:
+                    if best_model == "lgbm" and (model_dir / "churn_lgbm.txt").exists():
+                        import lightgbm as lgb
+                        booster   = lgb.Booster(model_file=str(model_dir / "churn_lgbm.txt"))
+                        explainer = shap.TreeExplainer(booster)
+                    else:
+                        raise ImportError
+                except Exception:
+                    model = XGBClassifier()
+                    model.load_model(str(model_dir / "churn_xgb.json"))
+                    explainer  = shap.TreeExplainer(model)
+                    best_model = "xgb"
+
+                shap_vals = explainer.shap_values(sample)
+                if isinstance(shap_vals, list):
+                    shap_vals = shap_vals[1]
+
+                importance_df = pd.DataFrame({
+                    "feature":    [FEATURE_KO.get(f, f) for f in CHURN_FEATURES],
+                    "importance": np.abs(shap_vals).mean(axis=0),
+                }).sort_values("importance", ascending=True)
+
+                fig = px.bar(
+                    importance_df, x="importance", y="feature",
+                    orientation="h",
+                    title=f"SHAP 피처 중요도 (모델: {best_model.upper()})",
+                    labels={"importance": "Mean |SHAP value|", "feature": "피처"},
+                    color="importance",
+                    color_continuous_scale="Reds",
+                )
+                fig.update_layout(coloraxis_showscale=False)
+                st.plotly_chart(fig, use_container_width=True)
+
+                top_feat = importance_df.iloc[-1]["feature"]
+                st.info(f"**가장 중요한 이탈 요인**: {top_feat} — 이 지표가 낮을수록 이탈 가능성이 높습니다.")
+
+        except ImportError:
+            st.warning("SHAP 패키지가 설치되지 않았습니다.")
+        except Exception as e:
+            st.error(f"SHAP 분석 오류: {e}")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4  Funnel & Retention
@@ -459,3 +541,70 @@ with tab4:
         fig.update_yaxes(tickformat=".2%")
         fig.update_traces(line_color="#FF6B6B")
         st.plotly_chart(fig, use_container_width=True)
+
+    # ── 코호트 리텐션 히트맵 ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📅 코호트별 리텐션 (Day-1 / Day-7 / Day-30)")
+    st.caption("같은 달에 처음 접속한 유저들이 이후에 얼마나 남아있는지 추적합니다.")
+
+    cohort_df = bq(f"""
+        WITH first_activity AS (
+            SELECT
+                user_id,
+                MIN(event_date)                        AS first_date,
+                DATE_TRUNC(MIN(event_date), MONTH)     AS cohort_month
+            FROM `{P}.events`
+            GROUP BY user_id
+        ),
+        retention AS (
+            SELECT
+                f.cohort_month,
+                COUNT(DISTINCT f.user_id) AS cohort_size,
+                COUNT(DISTINCT CASE WHEN DATE_DIFF(e.event_date, f.first_date, DAY)
+                    BETWEEN 1 AND 2  THEN f.user_id END) AS day1,
+                COUNT(DISTINCT CASE WHEN DATE_DIFF(e.event_date, f.first_date, DAY)
+                    BETWEEN 6 AND 8  THEN f.user_id END) AS day7,
+                COUNT(DISTINCT CASE WHEN DATE_DIFF(e.event_date, f.first_date, DAY)
+                    BETWEEN 28 AND 32 THEN f.user_id END) AS day30
+            FROM first_activity f
+            LEFT JOIN `{P}.events` e ON f.user_id = e.user_id
+            GROUP BY f.cohort_month
+        )
+        SELECT
+            FORMAT_DATE('%Y-%m', cohort_month) AS cohort,
+            cohort_size,
+            ROUND(SAFE_DIVIDE(day1,  cohort_size) * 100, 1) AS day1_pct,
+            ROUND(SAFE_DIVIDE(day7,  cohort_size) * 100, 1) AS day7_pct,
+            ROUND(SAFE_DIVIDE(day30, cohort_size) * 100, 1) AS day30_pct
+        FROM retention
+        ORDER BY cohort_month
+    """)
+
+    if not cohort_df.empty:
+        import plotly.graph_objects as go_
+
+        heat_data = cohort_df[["day1_pct", "day7_pct", "day30_pct"]].values.tolist()
+        fig = go_.Figure(go_.Heatmap(
+            z=heat_data,
+            x=["Day-1", "Day-7", "Day-30"],
+            y=cohort_df["cohort"].tolist(),
+            colorscale="RdYlGn",
+            zmin=0, zmax=100,
+            text=[[f"{v}%" for v in row] for row in heat_data],
+            texttemplate="%{text}",
+            showscale=True,
+            colorbar=dict(title="리텐션율(%)"),
+        ))
+        fig.update_layout(title="코호트별 리텐션율 (%)", xaxis_title="", yaxis_title="가입 월")
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.dataframe(
+            cohort_df.rename(columns={
+                "cohort":      "가입월",
+                "cohort_size": "코호트 유저수",
+                "day1_pct":    "Day-1 (%)",
+                "day7_pct":    "Day-7 (%)",
+                "day30_pct":   "Day-30 (%)",
+            }),
+            use_container_width=True, hide_index=True,
+        )

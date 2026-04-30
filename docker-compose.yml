@@ -135,13 +135,15 @@ services:
     image: python:3.11-slim
     working_dir: /dashboard
     command: >
-      bash -c "pip install --quiet -r requirements.txt &&
+      bash -c "apt-get update -qq && apt-get install -y -qq libgomp1 &&
+               pip install --quiet -r requirements.txt &&
                streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
     ports:
       - "8501:8501"
     volumes:
       - ./dashboard:/dashboard
       - ${GOOGLE_APPLICATION_CREDENTIALS}:/dashboard/gcp/service-account.json:ro
+      - ./data:/dashboard/data:ro
     environment:
       GOOGLE_APPLICATION_CREDENTIALS: /dashboard/gcp/service-account.json
       GCP_PROJECT_ID: ${GCP_PROJECT_ID}
