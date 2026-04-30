@@ -1,0 +1,32 @@
+# 환경변수 & 인증
+.env
+*.json
+
+# GCP 서비스 계정 키 (절대 커밋 금지)
+dashboard/gcp/
+gcp/
+
+# 생성 데이터 (대용량, 자동생성)
+data/
+
+# Airflow 로그
+logs/
+
+# MLflow DB & 아티팩트
+mlflow/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+venv/
+.venv/
+
+# macOS
+.DS_Store
+
+# 개인 문서 (레포에 불필요)
+notion_portfolio.md
+에어플로우.txt
+스크린샷.png
