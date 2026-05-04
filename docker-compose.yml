@@ -148,6 +148,7 @@ services:
       GOOGLE_APPLICATION_CREDENTIALS: /dashboard/gcp/service-account.json
       GCP_PROJECT_ID: ${GCP_PROJECT_ID}
       BIGQUERY_DATASET: ${BIGQUERY_DATASET}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
     restart: always
 
 volumes:

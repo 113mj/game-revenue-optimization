@@ -48,11 +48,12 @@ with st.sidebar:
         st.rerun()
 
 # ── 탭 ────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Overview",
     "🧪 A/B Test",
     "🔮 Churn / LTV",
     "🔽 Funnel & Retention",
+    "🤖 AI 에이전트",
 ])
 
 
@@ -608,3 +609,241 @@ with tab4:
             }),
             use_container_width=True, hide_index=True,
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5  AI 에이전트
+# ══════════════════════════════════════════════════════════════════════════════
+_SCHEMA = f"""
+BigQuery 프로젝트: {P}
+
+사용 가능한 테이블:
+
+1. daily_game_metrics
+   - metric_date DATE, DAU INT, MAU INT, DNU INT
+   - total_revenue FLOAT, ARPU FLOAT, ARPPU FLOAT, PUR FLOAT
+   - PCU INT, ACU INT
+
+2. events  (유저×날짜 행동 집계)
+   - user_id STRING, event_date DATE
+   - login_yn BOOL, playtime_minutes INT, level INT
+   - stage_clear_yn BOOL
+   - gacha_result STRING (N/R/SR/SSR), gacha_try_count INT
+   - item_use_count INT, session_count INT, consecutive_login_days INT
+
+3. purchases  (결제 로그)
+   - user_id STRING, purchase_date DATE
+   - purchase_amount FLOAT  -- 990/1900/4900/9900/29900/49900/99900 (원)
+   - item_category STRING  -- gacha/costume/stamina/package
+   - is_first_purchase BOOL, payment_count INT, cumulative_amount FLOAT
+
+4. marketing_events  (A/B 테스트 캠페인)
+   - user_id STRING, campaign_date DATE
+   - impression_yn BOOL, click_yn BOOL, conversion_yn BOOL
+   - reward_amount FLOAT  -- 1000=A그룹, 1500=B그룹
+   - ad_cost FLOAT, ad_revenue FLOAT
+
+5. user_daily_snapshot  (유저 일별 스냅샷 + 모델 예측)
+   - user_id STRING, snapshot_date DATE
+   - churn_risk_score FLOAT  -- 0~1 (이탈 위험도)
+   - max_level INT, total_playtime INT, total_gacha INT
+   - total_spent FLOAT, active_days INT
+
+규칙:
+- 반드시 정확한 테이블 풀네임을 사용하세요: `{P}.테이블명`
+- 날짜 비교는 DATE 함수 또는 CURRENT_DATE() 사용
+- 결과는 최대 500행으로 LIMIT 제한
+- A그룹: reward_amount = 1000, B그룹: reward_amount = 1500
+"""
+
+_SYSTEM_PROMPT = f"""당신은 Chronicle Tactics 모바일 게임의 데이터 분석 전문가입니다.
+유저가 자연어로 질문하면 BigQuery SQL을 생성하여 데이터를 조회하고 마케팅/비즈니스 인사이트를 제공합니다.
+
+{_SCHEMA}
+
+응답 방식:
+1. 어떤 쿼리를 실행할지 간단히 설명
+2. run_bigquery_query 도구로 SQL 실행
+3. 결과를 바탕으로 한국어로 명확한 인사이트 제공
+4. 필요시 추가 쿼리로 심층 분석
+
+항상 구체적인 숫자와 비율을 언급하고, 마케팅/비즈니스 관점의 액션 아이템을 제안하세요."""
+
+
+def _run_agent(user_question: str) -> list[dict]:
+    """Gemini Function Calling 기반 에이전트 실행. 메시지 리스트 반환."""
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key:
+        return [{"type": "error", "text": "GEMINI_API_KEY가 설정되지 않았습니다. .env 파일에 추가해주세요."}]
+
+    try:
+        from google import genai as _genai
+        from google.genai import types as _gtypes
+    except ImportError:
+        return [{"type": "error", "text": "google-genai 패키지가 설치되지 않았습니다. requirements.txt를 확인해주세요."}]
+
+    client = _genai.Client(api_key=api_key)
+
+    bq_tool = _gtypes.Tool(
+        function_declarations=[
+            _gtypes.FunctionDeclaration(
+                name="run_bigquery_query",
+                description="BigQuery SQL 쿼리를 실행하고 결과를 반환합니다. LIMIT 500 포함.",
+                parameters={
+                    "type": "OBJECT",
+                    "properties": {
+                        "sql":         {"type": "STRING", "description": "실행할 BigQuery SQL 쿼리"},
+                        "description": {"type": "STRING", "description": "이 쿼리가 무엇을 분석하는지 한 줄 설명"},
+                    },
+                    "required": ["sql", "description"],
+                },
+            )
+        ]
+    )
+
+    cfg = _gtypes.GenerateContentConfig(
+        system_instruction=_SYSTEM_PROMPT,
+        tools=[bq_tool],
+    )
+
+    contents = [_gtypes.Content(role="user", parts=[_gtypes.Part(text=user_question)])]
+    output_blocks: list[dict] = []
+
+    for _ in range(5):
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=contents,
+            config=cfg,
+        )
+
+        candidate = response.candidates[0]
+        fn_response_parts = []
+
+        for part in candidate.content.parts:
+            if getattr(part, "text", None):
+                output_blocks.append({"type": "text", "text": part.text})
+
+            fn_call = getattr(part, "function_call", None)
+            if fn_call and fn_call.name == "run_bigquery_query":
+                sql  = fn_call.args.get("sql", "")
+                desc = fn_call.args.get("description", "")
+                output_blocks.append({"type": "sql", "sql": sql, "desc": desc})
+
+                try:
+                    result_df = bq(sql)
+                    result_str = result_df.to_string(index=False) if not result_df.empty else "결과 없음 (0행)"
+                    if not result_df.empty:
+                        output_blocks.append({"type": "table", "df": result_df})
+                except Exception as e:
+                    result_str = f"쿼리 오류: {e}"
+                    output_blocks.append({"type": "error", "text": result_str})
+
+                fn_response_parts.append(
+                    _gtypes.Part(
+                        function_response=_gtypes.FunctionResponse(
+                            name=fn_call.name,
+                            response={"result": result_str},
+                        )
+                    )
+                )
+
+        if not fn_response_parts:
+            break
+
+        contents.append(candidate.content)
+        contents.append(_gtypes.Content(role="user", parts=fn_response_parts))
+
+    return output_blocks
+
+
+with tab5:
+    st.subheader("🤖 AI 데이터 분석 에이전트")
+    st.caption(
+        "자연어로 질문하면 Gemini AI가 BigQuery SQL을 생성하고 게임 데이터를 분석합니다. "
+        "(Google Gemini 1.5 Flash 기반 Function Calling)"
+    )
+
+    api_configured = bool(os.getenv("GEMINI_API_KEY", ""))
+    if not api_configured:
+        st.warning(
+            "⚠️ **GEMINI_API_KEY**가 설정되지 않았습니다.  \n"
+            "`.env` 파일에 `GEMINI_API_KEY=AIza...` 를 추가하고 컨테이너를 재시작하세요.  \n"
+            "[Google AI Studio](https://aistudio.google.com/app/apikey) 에서 무료로 발급받을 수 있습니다."
+        )
+
+    # 예시 질문 버튼
+    st.markdown("**예시 질문:**")
+    ex_cols = st.columns(3)
+    example_questions = [
+        "A/B 테스트 결과를 요약해줘",
+        "최근 30일 매출 트렌드 분석해줘",
+        "이탈 위험 유저 상위 10명 보여줘",
+        "카테고리별 결제 현황 알려줘",
+        "Day-1 리텐션이 가장 높은 달은?",
+        "ARPU가 가장 높은 날은 언제야?",
+    ]
+    for i, q in enumerate(example_questions):
+        if ex_cols[i % 3].button(q, key=f"ex_{i}", disabled=not api_configured):
+            st.session_state["ai_prefill"] = q
+
+    st.markdown("---")
+
+    # 채팅 히스토리 초기화
+    if "ai_chat_history" not in st.session_state:
+        st.session_state["ai_chat_history"] = []
+    if "ai_prefill" not in st.session_state:
+        st.session_state["ai_prefill"] = ""
+
+    # 히스토리 렌더링
+    for turn in st.session_state["ai_chat_history"]:
+        with st.chat_message(turn["role"]):
+            if turn["role"] == "user":
+                st.write(turn["content"])
+            else:
+                for block in turn["blocks"]:
+                    if block["type"] == "text":
+                        st.write(block["text"])
+                    elif block["type"] == "sql":
+                        with st.expander(f"🔍 SQL: {block['desc']}", expanded=False):
+                            st.code(block["sql"], language="sql")
+                    elif block["type"] == "table":
+                        st.dataframe(block["df"], use_container_width=True, hide_index=True)
+                    elif block["type"] == "error":
+                        st.error(block["text"])
+
+    # 채팅 입력
+    prefill = st.session_state.pop("ai_prefill", "")
+    user_input = st.chat_input(
+        "질문을 입력하세요. 예: A/B 테스트 CVR 차이가 통계적으로 유의한가?",
+        disabled=not api_configured,
+        key="ai_chat_input",
+    )
+    if prefill:
+        user_input = prefill
+
+    if user_input:
+        st.session_state["ai_chat_history"].append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.write(user_input)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Gemini가 분석 중입니다..."):
+                blocks = _run_agent(user_input)
+
+            for block in blocks:
+                if block["type"] == "text":
+                    st.write(block["text"])
+                elif block["type"] == "sql":
+                    with st.expander(f"🔍 SQL: {block['desc']}", expanded=False):
+                        st.code(block["sql"], language="sql")
+                elif block["type"] == "table":
+                    st.dataframe(block["df"], use_container_width=True, hide_index=True)
+                elif block["type"] == "error":
+                    st.error(block["text"])
+
+        st.session_state["ai_chat_history"].append({"role": "assistant", "blocks": blocks})
+
+    if st.session_state["ai_chat_history"]:
+        if st.button("🗑️ 대화 초기화", key="clear_chat"):
+            st.session_state["ai_chat_history"] = []
+            st.rerun()
