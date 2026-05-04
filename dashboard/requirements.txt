@@ -11,3 +11,4 @@ statsmodels>=0.14.0
 shap>=0.44.0
 xgboost>=2.0.0
 lightgbm>=4.3.0
+google-genai>=0.8.0
