@@ -44,8 +44,11 @@
 | **ML 모델** | 이탈 예측 (XGBoost vs LightGBM, AUC 기준 자동 선택) |
 | **LTV 예측** | XGBoost vs LightGBM Regressor (RMSE 기준 자동 선택) |
 | **실험 추적** | MLflow — 파라미터·메트릭·모델 버전 관리 |
-| **A/B 테스트** | 보상 A(1,000) vs B(1,500) — Chi-square 통계 검정 |
-| **대시보드** | Streamlit — Overview / A/B Test / Churn·LTV / Funnel |
+| **A/B 테스트** | 보상 A(1,000) vs B(1,500) — Chi-square + DoWhy 인과추론(ATE) |
+| **설명 가능한 AI** | SHAP Feature Importance — 이탈 예측 주요 요인 시각화 |
+| **코호트 분석** | Day-1 / Day-7 / Day-30 리텐션 히트맵 |
+| **AI 에이전트** | Gemini 2.5 Flash 기반 자연어 → BigQuery SQL 자동 생성 |
+| **대시보드** | Streamlit 5탭 — Overview / A/B Test / Churn·LTV / Funnel / AI 에이전트 |
 
 ---
 
@@ -57,8 +60,11 @@
 | Orchestration | Apache Airflow 2.9 (LocalExecutor) |
 | Storage | GCP Cloud Storage, BigQuery |
 | ML | XGBoost, LightGBM, scikit-learn |
+| Causal Inference | DoWhy, statsmodels |
+| Explainability | SHAP |
 | Experiment Tracking | MLflow 2.14 |
 | Dashboard | Streamlit, Plotly |
+| AI Agent | Google Gemini 2.5 Flash (Function Calling) |
 | Infrastructure | Docker, Docker Compose |
 
 ---
@@ -82,7 +88,7 @@ game-revenue-optimization/
 │   ├── main.py                  # 실행 진입점 (backfill / incremental)
 │   └── upload_to_gcp.py         # GCS/BQ 업로드
 ├── dashboard/
-│   └── app.py                   # Streamlit 대시보드 (4탭)
+│   └── app.py                   # Streamlit 대시보드 (5탭 + Gemini AI 에이전트)
 └── docker-compose.yml           # 전체 서비스 정의
 ```
 
@@ -143,6 +149,7 @@ DAG3 실행 → 두 모델 학습 → MLflow 메트릭 비교
 | B (Treatment) | 1,500 | 4.5% |
 
 - 통계 검정: Chi-square test (p < 0.05 기준)
+- 인과추론: DoWhy ATE(Average Treatment Effect) 추정 + Placebo 반박 검정
 - 비즈니스 임팩트: 월간 매출 증가 추정
 
 ---
@@ -197,3 +204,4 @@ Airflow UI에서 DAG1 → DAG2 → DAG3 순으로 수동 트리거하거나, 스
 | `BIGQUERY_DATASET` | BigQuery 데이터셋 이름 |
 | `GOOGLE_APPLICATION_CREDENTIALS` | 서비스 계정 JSON 경로 |
 | `MLFLOW_TRACKING_URI` | MLflow 서버 URI (기본: http://mlflow:5000) |
+| `GEMINI_API_KEY` | Google Gemini API 키 ([발급](https://aistudio.google.com/app/apikey)) |
